@@ -1,0 +1,238 @@
+---
+title: "Capstone"
+author: "Rahul"
+date: "December 12, 2016"
+output: html_document
+
+*Springboard Foundations of Data Science*  
+*By Rahul Arora*  
+*Mentor: Shmuel Naaman*  
+*December, 12, 2016*
+
+## Overview
+Currently, daily inventory calculations are performed by direct delivery sales employees who must single-handedly predict the supply and demand based on their personal experiences with each store. With some bakery items carrying a one week shelf life, the acceptable margin for error is small. Forecasting inventory demand will increase customer satisfaction and reduce surplus product unfit for sale.
+
+## Data set
+Downloaded data from Kaggle (https://www.kaggle.com/c/grupo-bimbo-inventory-demand/data)
+Dataset consists of 9 weeks of sales transactions in Mexico. Every week, there are delivery trucks that deliver products to the vendors. Each transaction consists of sales and returns. Returns are the products that are unsold and expired. The demand for a product in a certain week is defined as the sales this week subtracted by the return next week.
+
+
+
+## Load Libraries
+
+```{r library_load echo=FALSE, message=FALSE, warning=FALSE}
+
+library(caret)
+library(randomForest)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+
+df_train_random <- read.csv('C:\\Users\\Rahul\\Documents\\SpingBoard\\Capstone\\Bimbo\\train_random.csv')
+
+```
+
+
+## Data Analysis
+Explore the various features of the Data set
+
+```{r plot_features echo=FALSE, message=FALSE, warning=FALSE}
+
+summary(df_train_random)
+
+# Adjusted Demand 
+
+ggplot(data = df_train_random, aes( x = Adjusted_Demand ) ) +  
+  geom_histogram( bins = 30 ) +scale_x_log10()
+
+#  Used Box Plot to observe outliers in Adjusted Demand
+
+ggplot(data = df_train, aes( x = 1, y = Sales_this_week.pesos. ) ) +  
+  geom_boxplot()   +scale_y_log10()
+
+# Product ID
+
+df_train_random %>% count(Product_ID, sort = TRUE) -> product_count
+top10_products = product_count$Product_ID[1:10]
+
+df_train_random %>% group_by(Product_ID) %>%
+  summarise( Sum_Adj_Demand = sum(Adjusted_Demand),
+             Sum_Sales_Unit = sum(Sales_unit_this_week),
+             sum_Returns_Unit = sum(Returns_unit_next_week)) -> Products_summary
+
+View(Products_summary)
+
+Products_summary %>% filter(sum_Returns_Unit ==0) -> High_demand_Products
+
+Products_summary %>% filter(Sum_Sales_Unit ==0) -> Low_demand_Products
+
+View(High_demand_Products)
+
+View(Low_demand_Products)
+
+df_train_random %>% 
+    filter(Product_ID %in% top5_products) %>% 
+    ggplot(aes(x = Product_ID, y = log1p(Adjusted_Demand))) +
+    geom_boxplot() +
+    ggtitle("Boxplots of Demand per Product")
+
+df_train_random %>% 
+    filter(Product_ID %in% High_demand_Products$Product_ID) %>% 
+    filter(Adjusted_Demand < 50) %>% 
+    ggplot(aes(x = Adjusted_Demand, fill = Product_ID)) +
+    geom_bar() +
+    facet_wrap( ~ Product_ID) +
+    ggtitle("Demand Distributions for Top Products")
+    
+df_train_random %>% 
+    filter(Product_ID %in% Low_demand_Products$Product_ID) %>% 
+    filter(Adjusted_Demand < 50) %>% 
+    ggplot(aes(x = Returns_unit_next_week)) +
+    geom_bar() +
+    facet_wrap( ~ Product_ID) +
+    ggtitle("Demand Distributions for Bottom Products")
+    
+# Client ID 
+
+df_train_random %>% count(Client_ID, sort = TRUE) -> client_count
+top10_client = client_count$Client_ID[1:10]
+
+client_count %>% filter(Client_ID %in% top5_client) -> Top10_clients
+
+ggplot(data = Top10_clients, aes( x = factor(Client_ID), y = n ) ) +
+geom_bar(stat = "identity") +
+ scale_x_discrete(name="Client ID")+
+  scale_y_log10(name="Counts") +
+ggtitle("Top Clients")
+
+
+# Sales Channel
+
+df_train_random %>% count(Sales_Channel_ID, sort = TRUE) -> Sales_Channel_count
+
+ggplot(data = Sales_Channel_count, aes( x = factor(Sales_Channel_ID), y = n ) ) +
+geom_bar(stat = "identity") +
+ scale_x_discrete(name="Sales_Channel ID")+
+  scale_y_log10(name="Counts") +
+ggtitle("Top Sales Channel")
+```
+
+## Feature Selection
+
+```{r feature echo=FALSE, message=FALSE, warning=FALSE}
+
+inTraining <- createDataPartition(df_train_random$Adjusted_Demand, p = .8, list = FALSE)
+
+# Split the Training data set into Train and Test data frames
+
+train_1 <- df_train_random[ inTraining,]
+test_1  <- df_train_random[-inTraining,]
+
+A<- summary(lm(Adjusted_Demand ~., data = df_train_random))
+
+# fit the model
+model <- train(Adjusted_Demand ~., 
+               data=train_1, 
+               method="rf", 
+               metric="RMSE", 
+               tuneGrid=expand.grid(.mtry=4), 
+               ntree=400,
+               importance=TRUE)
+
+# what are the important variables (via permutation)
+vi <- varImp(model, type=1)
+plot(vi, top=10, main = 'Feature Importance')
+
+
+```
+
+
+## Random Forest Model: K-Fold and Grid Search Cross Validation 
+
+In k-fold cross-validation, the original sample is randomly partitioned into 'k' equal sized subsample. 
+Of the 'k' subsamples, a single subsample is retained as the validation data for testing the model, and the remaining 'k−1' subsamples are used as training data. 
+The cross-validation process is then repeated 'k' times (the folds), with each of the 'k' subsamples used exactly once as the validation data. The 'k'results from the folds can then be averaged to produce a single estimation.
+
+```{r model echo=FALSE, message=FALSE, warning=FALSE}
+
+# ensure results are repeatable
+set.seed(123)
+
+# Manual Grid Search
+control <- trainControl(method="repeatedcv", 
+                        number=10, 
+                        repeats=1, 
+                        search="grid")
+tunegrid <- expand.grid(.mtry=c(3,4))
+modellist <- list()
+metric = "RMSE"
+
+#For loop of gridsearch
+for (ntree in c(50, 100, 150, 200, 250, 300, 350, 400, 450, 500)) {
+	set.seed(123)
+	fit <- train(Adjusted_Demand ~ Product_ID + Sales_unit_this_week + Sales_this_week.pesos. +
+                 Returns_unit_next_week + Client_ID + Route_ID + 
+                 Sales_Channel_ID + Returns_next_week.pesos., 
+	             data=train_1, 
+	             method="rf", 
+	             metric=metric, 
+	             tuneGrid=tunegrid, 
+	             trControl=control, 
+	             ntree=ntree)
+	key <- toString(ntree)
+	modellist[[key]] <- fit
+}
+
+results <- resamples(modellist)
+summary(results)
+
+```
+
+
+## Random Forest Model
+***
+Random forests are an ensemble learning method for regression, that operate by constructing a multitude of decision trees at training time and outputting the mean prediction (regression) of the individual trees. 
+Each decision tree is constructed by using a random subset of the training data. After you have trained your forest, you can then pass each test row through it, in order to output a prediction.
+ 
+```{r RF echo=FALSE, message=FALSE, warning=FALSE}
+
+# fit the randomforest model
+model_rf <- randomForest(Adjusted_Demand ~ Product_ID + Sales_unit_this_week + Sales_this_week.pesos. +
+                 Returns_unit_next_week + Client_ID + Route_ID + 
+                 Sales_Channel_ID + Returns_next_week.pesos., data=train_1, mtry=3, ntree=200)
+
+# predict the outcome of the training data
+predicted_tr <- predict(model_rf, newdata=train_1, select = -c(Adjusted_Demand))
+actual_tr <- train_1$Adjusted_Demand
+rsq_tr <- 1-sum((actual_tr-predicted_tr)^2)/sum((actual_tr-mean(actual_tr))^2)
+
+# predict the outcome of the testing data
+predicted <- predict(model_rf, newdata=test_1, select = -c(Adjusted_Demand))
+actual <- test_1$Adjusted_Demand
+rsq <- 1-sum((actual-predicted)^2)/sum((actual-mean(actual))^2)
+
+```
+
+## Evaluating the Model with Validation Data, unseen by the model
+The evaluation metric for this competition is Root Mean Squared Logarithmic Error.
+
+```{r Eval echo=FALSE, message=FALSE, warning=FALSE}
+
+df_test_final <- read.csv('C:\\Users\\Rahul\\Documents\\SpingBoard\\Capstone\\Bimbo\\train_week9_random_subset.csv')
+
+# predict the outcome of the Validation data (Data unseen by the model)
+predicted_eval <- predict(model_rf, newdata=df_test_final, select = -c(Adjusted_Demand))
+actual_eval <- df_test_final$Adjusted_Demand
+rsq_eval <- 1-sum((actual_eval-predicted_eval)^2)/sum((actual_eval-mean(actual_eval))^2)
+
+## Model Performance - Root 
+rmlse <- function(model_rf) { 
+  y <- train_1$Adjusted_Demand
+  y.pred <- predict(model_rf, df_test_final)
+  return(sqrt(1/length(y)*sum((log(y.pred +1)-log(train_1$Adjusted_Demand +1))^2)))
+}
+
+rmlse(model_rf)
+
+```
+
